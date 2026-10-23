@@ -36,21 +36,22 @@ final class PersistenceController {
         container.viewContext.undoManager = nil
     }
 
-    // URL state now uses UserDefaults for simplicity
+    // Browser state uses UserDefaults for simplicity
     @MainActor
-    func saveURLState(urlString: String, currentURL: String, webVolume: Double) {
-        UserDefaults.standard.set(urlString, forKey: "Focus.urlString")
-        UserDefaults.standard.set(currentURL, forKey: "Focus.currentURL")
+    func saveBrowserState(tabURLs: [String], webVolume: Double) {
+        UserDefaults.standard.set(tabURLs, forKey: "Focus.tabURLs")
         UserDefaults.standard.set(webVolume, forKey: "Focus.webVolume")
     }
 
     @MainActor
-    func loadURLState() -> (urlString: String, currentURL: String, webVolume: Double) {
-        let urlString = UserDefaults.standard.string(forKey: "Focus.urlString") ?? "https://www.google.com"
-        let currentURL = UserDefaults.standard.string(forKey: "Focus.currentURL") ?? "https://www.google.com"
+    func loadBrowserState() -> (tabURLs: [String], webVolume: Double) {
+        // Fall back to the single URL saved before tabs existed.
+        let tabURLs = UserDefaults.standard.stringArray(forKey: "Focus.tabURLs")
+            ?? UserDefaults.standard.string(forKey: "Focus.currentURL").map { [$0] }
+            ?? []
         let webVolume = UserDefaults.standard.object(forKey: "Focus.webVolume") as? Double ?? 1.0
         let normalizedWebVolume = min(max(webVolume, 0), 1)
-        return (urlString, currentURL, normalizedWebVolume)
+        return (tabURLs, normalizedWebVolume)
     }
 
     func saveTimers(_ timers: [ActiveTimer]) {

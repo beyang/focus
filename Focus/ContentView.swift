@@ -7,36 +7,25 @@
 
 import SwiftUI
 import WebKit
-import UserNotifications
 import Foundation
 import AppKit
-
-struct ActiveTimer: Identifiable {
-    let id: String
-    let originalInput: String
-    let endTime: Date
-    let message: String?
-}
 
 struct StyledTextField: View {
     let placeholder: String
     @Binding var text: String
     let font: Font
     let onSubmit: () -> Void
-    let onChange: ((String) -> Void)?
 
     init(
         placeholder: String,
         text: Binding<String>,
         font: Font = .system(.body, design: .monospaced),
-        onSubmit: @escaping () -> Void,
-        onChange: ((String) -> Void)? = nil
+        onSubmit: @escaping () -> Void
     ) {
         self.placeholder = placeholder
         self._text = text
         self.font = font
         self.onSubmit = onSubmit
-        self.onChange = onChange
     }
 
     var body: some View {
@@ -49,9 +38,6 @@ struct StyledTextField: View {
             .onSubmit {
                 onSubmit()
             }
-            .onChange(of: text) {
-                onChange?(text)
-            }
     }
 }
 
@@ -59,25 +45,29 @@ struct WebView: NSViewRepresentable {
     let url: URL
     let reloadToken: Int
     let volume: Double
+    let onTitleChange: (String?) -> Void
 
     class Coordinator: NSObject, WKNavigationDelegate {
         var lastReloadToken: Int
         var lastVolume: Double
         var lastRequestedURL: URL
+        var onTitleChange: (String?) -> Void
 
-        init(reloadToken: Int, volume: Double, url: URL) {
+        init(reloadToken: Int, volume: Double, url: URL, onTitleChange: @escaping (String?) -> Void) {
             self.lastReloadToken = reloadToken
             self.lastVolume = volume
             self.lastRequestedURL = url
+            self.onTitleChange = onTitleChange
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             WebView.applyVolume(lastVolume, to: webView)
+            onTitleChange(webView.title)
         }
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(reloadToken: reloadToken, volume: volume, url: url)
+        Coordinator(reloadToken: reloadToken, volume: volume, url: url, onTitleChange: onTitleChange)
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -106,6 +96,7 @@ struct WebView: NSViewRepresentable {
         context.coordinator.lastReloadToken = reloadToken
         context.coordinator.lastVolume = volume
         context.coordinator.lastRequestedURL = url
+        context.coordinator.onTitleChange = onTitleChange
     }
 
     private static func applyVolume(_ volume: Double, to webView: WKWebView) {
@@ -165,25 +156,46 @@ struct WebView: NSViewRepresentable {
 }
 
 struct ContentView: View {
+    @Environment(FocusModel.self) private var model
     @State private var escPressCount = 0
     @State private var escResetTimer: Foundation.Timer?
 
     var body: some View {
-        RemindersView()
-            .frame(minWidth: 1400, minHeight: 1000)
-            .onDisappear {
-                escResetTimer?.invalidate()
+        VStack(spacing: 0) {
+            TabBar()
+
+            Divider()
+
+            ZStack {
+                // Keep every browser tab alive so pages and media keep running in the background.
+                ForEach(model.browserTabs) { tab in
+                    let isSelected = model.selectedTab == .browser(tab.id)
+                    BrowserTabView(tab: tab)
+                        .opacity(isSelected ? 1 : 0)
+                        .allowsHitTesting(isSelected)
+                }
+
+                if model.selectedTab == .timers {
+                    TimersView()
+                }
             }
-            .onKeyPress(.escape) {
-                handleEscapePress()
-                return .handled
-            }
+        }
+        .onAppear {
+            model.requestNotificationPermission()
+        }
+        .onDisappear {
+            escResetTimer?.invalidate()
+        }
+        .onKeyPress(.escape) {
+            handleEscapePress()
+            return .handled
+        }
     }
-    
+
     private func handleEscapePress() {
         escPressCount += 1
         escResetTimer?.invalidate()
-        
+
         if escPressCount >= 2 {
             NSApplication.shared.keyWindow?.close()
             escPressCount = 0
@@ -195,476 +207,202 @@ struct ContentView: View {
     }
 }
 
-struct RemindersView: View {
-    @State private var urlString = "https://www.google.com"
-    @State private var currentURL: URL = URL(string: "https://www.google.com")!
-    @State private var webViewReloadToken = 0
-    @State private var commandInput = ""
-    @State private var showingCommandPanel = true
-    @State private var errorMessage = ""
-    @State private var activeTimers: [ActiveTimer] = []
-    @State private var currentTime = Date()
-    @State private var webVolume = 1.0
+struct TabBar: View {
+    @Environment(FocusModel.self) private var model
 
-    let persistenceController = PersistenceController.shared
+    var body: some View {
+        HStack(spacing: 4) {
+            TabButton(
+                title: model.activeTimers.isEmpty ? "Timers" : "Timers (\(model.activeTimers.count))",
+                systemImage: "timer",
+                isSelected: model.selectedTab == .timers,
+                onSelect: { model.selectedTab = .timers }
+            )
+
+            Divider()
+                .frame(height: 16)
+                .padding(.horizontal, 4)
+
+            ForEach(model.browserTabs) { tab in
+                TabButton(
+                    title: tab.displayTitle,
+                    systemImage: "globe",
+                    isSelected: model.selectedTab == .browser(tab.id),
+                    onSelect: { model.selectedTab = .browser(tab.id) },
+                    onClose: model.browserTabs.count > 1 ? { model.closeTab(tab.id) } : nil
+                )
+            }
+
+            Button {
+                model.newTab()
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("New tab")
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color(NSColor.controlBackgroundColor))
+    }
+}
+
+struct TabButton: View {
+    let title: String
+    let systemImage: String
+    let isSelected: Bool
+    let onSelect: () -> Void
+    var onClose: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .foregroundStyle(.secondary)
+
+            Text(title)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            if let onClose {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 14, height: 14)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Close tab")
+            }
+        }
+        .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .frame(maxWidth: 220, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.black.opacity(0.04))
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+    }
+}
+
+struct BrowserTabView: View {
+    @Environment(FocusModel.self) private var model
+    @Bindable var tab: BrowserTab
 
     var body: some View {
         VStack(spacing: 0) {
-            // Main content area with WebView column and right sidebar
-            HStack(spacing: 0) {
-                VStack(spacing: 0) {
-                    // URL bar should only span the web column
-                    HStack(spacing: 8) {
-                        StyledTextField(
-                            placeholder: "Enter URL",
-                            text: $urlString,
-                            font: .body,
-                            onSubmit: navigateToURL
-                        )
+            HStack(spacing: 8) {
+                StyledTextField(
+                    placeholder: "Enter URL",
+                    text: $tab.urlString,
+                    font: .body,
+                    onSubmit: { model.navigate(tab) }
+                )
 
-                        Button("Go") {
-                            navigateToURL()
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        Image(systemName: "speaker.wave.2.fill")
-                            .foregroundStyle(.secondary)
-
-                        Slider(value: $webVolume, in: 0...1, step: 0.01)
-                            .frame(width: 140)
-
-                        Text("\(Int(webVolume * 100))%")
-                            .font(.system(.caption, design: .monospaced))
-                            .frame(width: 40, alignment: .trailing)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .background(Color(NSColor.controlBackgroundColor))
-
-                    WebView(url: currentURL, reloadToken: webViewReloadToken, volume: webVolume)
-                        .background(Color.white)
+                Button("Go") {
+                    model.navigate(tab)
                 }
+                .buttonStyle(.borderedProminent)
 
-                if showingCommandPanel {
-                    rightSidebar
-                        .frame(width: 450)
-                        .background(Color(NSColor.controlBackgroundColor))
-                }
-            }
+                Image(systemName: "speaker.wave.2.fill")
+                    .foregroundStyle(.secondary)
 
-            // Bottom toolbar
-            HStack {
-                Button(showingCommandPanel ? "Hide Panel" : "Show Panels") {
-                    showingCommandPanel.toggle()
-                }
-                .buttonStyle(.borderless)
+                Slider(value: Bindable(model).webVolume, in: 0...1, step: 0.01)
+                    .frame(width: 140)
 
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(Color(NSColor.controlBackgroundColor))
-        }
-        .onAppear {
-            requestNotificationPermission()
-            loadPersistedState()
-        }
-        .onDisappear {
-            savePersistedState()
-        }
-        .onChange(of: webVolume) {
-            saveURLStateOnly()
-        }
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now in
-            currentTime = now
-            pruneExpiredTimers()
-        }
-    }
-
-    private var commandPanel: some View {
-        VStack(spacing: 0) {
-            // Command panel header
-            HStack {
-                Text("Timers")
-                    .font(.headline)
-
-                Spacer()
+                Text("\(Int(model.webVolume * 100))%")
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(width: 40, alignment: .trailing)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            .background(Color(NSColor.separatorColor).opacity(0.1))
+            .background(Color(NSColor.controlBackgroundColor))
 
-            // Command area
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Available Commands:")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Text("notif|notify <message> - Show notification")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-
-                Text("timer <time> [message] - Set timer (5s, 5h, 8:00, 16:00, 5pm, 4:30pm)")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+            WebView(url: tab.url, reloadToken: tab.reloadToken, volume: model.webVolume) { title in
+                tab.title = title
             }
-            .padding()
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white)
+        }
+    }
+}
 
-            // Active timers section
-            if !activeTimers.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Active Timers:")
-                        .font(.caption)
+struct TimersView: View {
+    @Environment(FocusModel.self) private var model
+    @State private var now = Date()
+
+    var body: some View {
+        Group {
+            if model.activeTimers.isEmpty {
+                VStack(spacing: 6) {
+                    Text("No active timers")
+                        .font(.headline)
+                    Text("Add one from the command bar, e.g. timer 25m stretch")
+                        .font(.callout)
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal)
-
-                    ForEach(activeTimers.sorted { remainingTime(for: $0) < remainingTime(for: $1) }) { timer in
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text(timer.originalInput)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(.primary)
-
-                                Spacer()
-
-                                Text(formatRemainingTime(remainingTime(for: timer)))
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-
-                                Button(action: {
-                                    cancelTimer(timer)
-                                }) {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 10))
-                                        .foregroundColor(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                                .frame(width: 16, height: 16)
-                            }
-
-                            if let message = timer.message, !message.isEmpty {
-                                Text(message)
-                                    .font(.system(.caption2))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.leading, 2)
-                            }
-                        }
-                        .padding(.horizontal)
-                        .padding(.vertical, 2)
-                    }
                 }
-                .padding(.bottom, 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach(model.activeTimers.sorted { $0.endTime < $1.endTime }) { timer in
+                            timerRow(timer)
+                        }
+                    }
+                    .padding(16)
+                    .frame(maxWidth: 640)
+                    .frame(maxWidth: .infinity)
+                }
+            }
+        }
+        .background(Color(NSColor.windowBackgroundColor))
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { date in
+            now = date
+        }
+    }
+
+    private func timerRow(_ timer: ActiveTimer) -> some View {
+        HStack(spacing: 12) {
+            Text(formatRemainingTime(timer.endTime.timeIntervalSince(now)))
+                .font(.system(.title2, design: .monospaced))
+                .frame(minWidth: 110, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 2) {
+                if let message = timer.message, !message.isEmpty {
+                    Text(message)
+                }
+                Text("timer \(timer.originalInput) · ends \(timer.endTime.formatted(date: .omitted, time: .shortened))")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
             }
 
             Spacer()
 
-            // Command input at bottom
-            VStack(spacing: 8) {
-                // Error message display
-                if !errorMessage.isEmpty {
-                    Text(errorMessage)
-                        .foregroundColor(.red)
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.red.opacity(0.1))
-                        .cornerRadius(4)
-                }
-
-                HStack(spacing: 4) {
-                    Text(">")
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundStyle(.secondary)
-
-                    StyledTextField(
-                        placeholder: "Enter command",
-                        text: $commandInput,
-                        onSubmit: processCommand,
-                        onChange: { _ in
-                            if !errorMessage.isEmpty {
-                                errorMessage = ""
-                            }
-                        }
-                    )
-                }
+            Button {
+                model.cancelTimer(timer)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
             }
-            .padding()
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Cancel timer")
         }
-    }
-
-    private var rightSidebar: some View {
-        GeometryReader { geometry in
-            VStack(spacing: 0) {
-                commandPanel
-                    .frame(height: geometry.size.height / 3)
-
-                Divider()
-
-                TodoView()
-                    .frame(height: geometry.size.height * 2 / 3)
-            }
-        }
-    }
-
-    private func requestNotificationPermission() {
-        ensureNotificationPermission { _ in }
-    }
-
-    private func ensureNotificationPermission(completion: @escaping (Bool) -> Void) {
-        let center = UNUserNotificationCenter.current()
-
-        center.getNotificationSettings { settings in
-            switch settings.authorizationStatus {
-            case .authorized, .provisional, .ephemeral:
-                completion(true)
-            case .notDetermined:
-                center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
-                    if let error = error {
-                        print("Notification permission error: \(error)")
-                    } else {
-                        print("Notification permission granted: \(granted)")
-                    }
-                    completion(granted)
-                }
-            case .denied:
-                DispatchQueue.main.async {
-                    self.errorMessage = "Notifications are disabled for Focus. Enable notifications in System Settings to use timer/notif commands."
-                }
-                completion(false)
-            @unknown default:
-                completion(false)
-            }
-        }
-    }
-
-    private func processCommand() {
-        let commandContent = commandInput.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Clear previous error
-        errorMessage = ""
-
-        guard !commandContent.isEmpty else {
-            errorMessage = "Please enter a command"
-            return
-        }
-
-        if commandContent.hasPrefix("notif ") || commandContent.hasPrefix("notify ") {
-            let messageStart = commandContent.hasPrefix("notify ") ? 7 : 6
-            let message = String(commandContent.dropFirst(messageStart)).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !message.isEmpty {
-                showNotification(title: message, message: "Triggered from Focus command panel")
-                commandInput = ""
-            } else {
-                errorMessage = "notif/notify command requires a message"
-            }
-        } else if commandContent.hasPrefix("timer ") {
-            let timerArgs = String(commandContent.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !timerArgs.isEmpty {
-                let components = timerArgs.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-                let timeString = String(components[0])
-                let message = components.count > 1 ? String(components[1]) : nil
-
-                if let timeInterval = parseTimeString(timeString) {
-                    scheduleTimer(timeInterval: timeInterval, originalInput: timeString, message: message)
-                    commandInput = ""
-                } else {
-                    errorMessage = "Invalid time format. Use: 5s, 5h, 8:00, 16:00, 5pm, or 4:30pm"
-                }
-            } else {
-                errorMessage = "timer command requires a time specification"
-            }
-        } else {
-            let unknownCmd = commandContent.split(separator: " ").first ?? ""
-            errorMessage = "Unknown command: '\(unknownCmd)'"
-        }
-
-        if errorMessage.isEmpty {
-            commandInput = ""
-        }
-    }
-
-    private func showNotification(title: String, message: String) {
-        ensureNotificationPermission { granted in
-            guard granted else {
-                return
-            }
-
-            print("Showing notification - Title: '\(title)', Message: '\(message)'")
-
-            let content = UNMutableNotificationContent()
-            content.title = title
-            content.body = message
-            content.sound = UNNotificationSound.default
-
-            let request = UNNotificationRequest(
-                identifier: UUID().uuidString,
-                content: content,
-                trigger: nil
-            )
-
-            UNUserNotificationCenter.current().add(request) { error in
-                if let error = error {
-                    print("Notification error: \(error)")
-                } else {
-                    print("Notification added successfully")
-                }
-            }
-        }
-    }
-
-    private func parseTimeString(_ timeString: String) -> TimeInterval? {
-        let input = timeString.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Handle duration formats (5s, 5m, 5h)
-        if input.hasSuffix("s") {
-            if let seconds = Double(String(input.dropLast())) {
-                return seconds
-            }
-        } else if input.hasSuffix("m") {
-            if let minutes = Double(String(input.dropLast())) {
-                return minutes * 60
-            }
-        } else if input.hasSuffix("h") {
-            if let hours = Double(String(input.dropLast())) {
-                return hours * 3600
-            }
-        }
-
-        // Handle absolute time formats (8:00, 16:00, 5pm)
-        let now = Date()
-        let calendar = Calendar.current
-
-        // Handle PM times (5pm, 12pm, 4:30pm, 12:15pm)
-        if input.hasSuffix("pm") {
-            let timeStr = String(input.dropLast(2))
-            if timeStr.contains(":") {
-                let components = timeStr.split(separator: ":")
-                if components.count == 2,
-                   let hour = Int(components[0]),
-                   let minute = Int(components[1]) {
-                    let adjustedHour = hour == 12 ? 12 : hour + 12
-                    if let targetDate = calendar.date(bySettingHour: adjustedHour, minute: minute, second: 0, of: now) {
-                        let interval = targetDate.timeIntervalSince(now)
-                        return interval > 0 ? interval : interval + 24 * 3600 // Next day if time has passed
-                    }
-                }
-            } else if let hour = Int(timeStr) {
-                let adjustedHour = hour == 12 ? 12 : hour + 12
-                if let targetDate = calendar.date(bySettingHour: adjustedHour, minute: 0, second: 0, of: now) {
-                    let interval = targetDate.timeIntervalSince(now)
-                    return interval > 0 ? interval : interval + 24 * 3600 // Next day if time has passed
-                }
-            }
-        }
-
-        // Handle AM times (5am, 12am, 8:15am, 12:30am)
-        if input.hasSuffix("am") {
-            let timeStr = String(input.dropLast(2))
-            if timeStr.contains(":") {
-                let components = timeStr.split(separator: ":")
-                if components.count == 2,
-                   let hour = Int(components[0]),
-                   let minute = Int(components[1]) {
-                    let adjustedHour = hour == 12 ? 0 : hour
-                    if let targetDate = calendar.date(bySettingHour: adjustedHour, minute: minute, second: 0, of: now) {
-                        let interval = targetDate.timeIntervalSince(now)
-                        return interval > 0 ? interval : interval + 24 * 3600 // Next day if time has passed
-                    }
-                }
-            } else if let hour = Int(timeStr) {
-                let adjustedHour = hour == 12 ? 0 : hour
-                if let targetDate = calendar.date(bySettingHour: adjustedHour, minute: 0, second: 0, of: now) {
-                    let interval = targetDate.timeIntervalSince(now)
-                    return interval > 0 ? interval : interval + 24 * 3600 // Next day if time has passed
-                }
-            }
-        }
-
-        // Handle 24-hour format (8:00, 16:30)
-        if input.contains(":") {
-            let components = input.split(separator: ":")
-            if components.count == 2,
-               let hour = Int(components[0]),
-               let minute = Int(components[1]) {
-                if let targetDate = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: now) {
-                    let interval = targetDate.timeIntervalSince(now)
-                    return interval > 0 ? interval : interval + 24 * 3600 // Next day if time has passed
-                }
-            }
-        }
-
-        return nil
-    }
-
-    private func scheduleTimer(timeInterval: TimeInterval, originalInput: String, message: String?) {
-        guard timeInterval >= 1 else {
-            errorMessage = "Timer must be at least 1 second"
-            return
-        }
-
-        let timerId = UUID().uuidString
-        let content = UNMutableNotificationContent()
-        content.title = "Timer"
-
-        if let message = message, !message.isEmpty {
-            content.body = "\(message) (Timer: \(originalInput))"
-        } else {
-            content.body = "Timer set for \(originalInput) has finished!"
-        }
-        content.sound = UNNotificationSound.default
-
-        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: timeInterval, repeats: false)
-        let request = UNNotificationRequest(
-            identifier: timerId,
-            content: content,
-            trigger: trigger
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(NSColor.controlBackgroundColor))
         )
-
-        ensureNotificationPermission { granted in
-            guard granted else {
-                return
-            }
-
-            UNUserNotificationCenter.current().add(request) { error in
-                if let error = error {
-                    DispatchQueue.main.async {
-                        let nsError = error as NSError
-                        if nsError.domain == UNErrorDomain && nsError.code == UNError.Code.notificationsNotAllowed.rawValue {
-                            self.errorMessage = "Notifications are disabled for Focus. Enable notifications in System Settings to use timers."
-                        } else {
-                            self.errorMessage = "Failed to schedule timer: \(error.localizedDescription)"
-                        }
-                    }
-                } else {
-                    DispatchQueue.main.async {
-                        let endTime = Date().addingTimeInterval(timeInterval)
-                        let activeTimer = ActiveTimer(id: timerId, originalInput: originalInput, endTime: endTime, message: message)
-                        self.activeTimers.append(activeTimer)
-                        self.savePersistedState()
-                    }
-                    print("Timer scheduled for \(timeInterval) seconds")
-                }
-            }
-        }
-    }
-
-    private func pruneExpiredTimers() {
-        let oldCount = activeTimers.count
-        activeTimers.removeAll { remainingTime(for: $0) <= 0 }
-        if activeTimers.count != oldCount {
-            savePersistedState()
-        }
-    }
-
-    private func remainingTime(for timer: ActiveTimer) -> TimeInterval {
-        timer.endTime.timeIntervalSince(currentTime)
-    }
-
-    private func cancelTimer(_ timer: ActiveTimer) {
-        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [timer.id])
-        activeTimers.removeAll { $0.id == timer.id }
-        savePersistedState()
     }
 
     private func formatRemainingTime(_ timeInterval: TimeInterval) -> String {
@@ -683,48 +421,9 @@ struct RemindersView: View {
             return String(format: "%02d:%02d", minutes, seconds)
         }
     }
-
-    private func navigateToURL() {
-        var processedURL = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Check if URL has a scheme
-        if !processedURL.contains("://") {
-            // Add https:// if no scheme is provided
-            processedURL = "https://" + processedURL
-            // Update the text field to show the complete URL
-            urlString = processedURL
-        }
-
-        if let url = URL(string: processedURL) {
-            if currentURL.absoluteString == url.absoluteString {
-                webViewReloadToken += 1
-            } else {
-                currentURL = url
-            }
-        }
-        saveURLStateOnly()
-    }
-
-    private func loadPersistedState() {
-        let state = persistenceController.loadURLState()
-        urlString = state.urlString
-        if let url = URL(string: state.currentURL) {
-            currentURL = url
-        }
-        webVolume = state.webVolume
-        activeTimers = persistenceController.loadTimers()
-    }
-
-    private func savePersistedState() {
-        saveURLStateOnly()
-        persistenceController.saveTimers(activeTimers)
-    }
-
-    private func saveURLStateOnly() {
-        persistenceController.saveURLState(urlString: urlString, currentURL: currentURL.absoluteString, webVolume: webVolume)
-    }
 }
 
 #Preview {
     ContentView()
+        .environment(FocusModel())
 }

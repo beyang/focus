@@ -21,34 +21,60 @@ final class SpotlightPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+enum CommandArguments {
+    case none
+    case optional(String)
+    case required(String)
+}
+
 struct SpotlightCommand: Identifiable {
     let id = UUID()
     let name: String
-    let aliases: [String]
-    let action: () -> Void
+    var aliases: [String] = []
+    var arguments: CommandArguments = .none
+    let summary: String
+    var hidesPanel = false
+    let action: (String) -> Void
 
     var searchableTerms: [String] {
         [name] + aliases
     }
+
+    var usage: String {
+        switch arguments {
+        case .none:
+            return name
+        case .optional(let hint), .required(let hint):
+            return "\(name) \(hint)"
+        }
+    }
 }
 
 final class CommandRegistry {
-    private var commands: [SpotlightCommand] = []
+    private(set) var commands: [SpotlightCommand] = []
 
     func register(_ command: SpotlightCommand) {
         commands.append(command)
     }
 
-    func execute(_ command: SpotlightCommand) {
-        command.action()
+    /// Finds a command typed by name and followed by its arguments, such as "timer 5m tea".
+    func invocation(for input: String) -> (command: SpotlightCommand, arguments: String)? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = trimmed.lowercased()
+
+        for command in commands {
+            if case .none = command.arguments { continue }
+            for term in command.searchableTerms.map({ $0.lowercased() })
+            where lowercased == term || lowercased.hasPrefix(term + " ") {
+                let arguments = String(trimmed.dropFirst(term.count)).trimmingCharacters(in: .whitespaces)
+                return (command, arguments)
+            }
+        }
+        return nil
     }
 
     func matchingCommands(for input: String) -> [SpotlightCommand] {
         let query = normalize(input)
-        if query.isEmpty {
-            return commands
-        }
-
         return commands
             .compactMap { command -> (SpotlightCommand, Int)? in
                 let bestScore = command.searchableTerms
@@ -129,15 +155,26 @@ final class CommandRegistry {
 }
 
 struct SpotlightPanelContentView: View {
+    @Environment(FocusModel.self) private var model
     @State private var query = ""
     @State private var selectedIndex = 0
     @FocusState private var commandFieldFocused: Bool
 
-    let commandSuggestions: (String) -> [SpotlightCommand]
-    let onSubmitSelection: (SpotlightCommand?) -> Void
+    let registry: CommandRegistry
+    let onExecute: (SpotlightCommand, String) -> Void
+
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     private var visibleCommands: [SpotlightCommand] {
-        commandSuggestions(query)
+        if trimmedQuery == "?" {
+            return registry.commands
+        }
+        if let invocation = registry.invocation(for: trimmedQuery) {
+            return [invocation.command]
+        }
+        return Array(registry.matchingCommands(for: trimmedQuery).prefix(6))
     }
 
     private var selectedCommand: SpotlightCommand? {
@@ -149,7 +186,7 @@ struct SpotlightPanelContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
-                TextField("Type a command...", text: $query)
+                TextField("Type a command, or ? for help", text: $query)
                     .textFieldStyle(.plain)
                     .font(.system(size: 16, weight: .medium, design: .rounded))
                     .padding(.horizontal, 12)
@@ -160,12 +197,11 @@ struct SpotlightPanelContentView: View {
                     )
                     .focused($commandFieldFocused)
                     .onSubmit {
-                        onSubmitSelection(selectedCommand)
-                        query = ""
-                        selectedIndex = 0
+                        submit()
                     }
                     .onChange(of: query) {
                         selectedIndex = 0
+                        model.errorMessage = ""
                     }
                     .onKeyPress(.upArrow) {
                         guard !visibleCommands.isEmpty else { return .handled }
@@ -178,24 +214,18 @@ struct SpotlightPanelContentView: View {
                         return .handled
                     }
 
+                if !model.errorMessage.isEmpty {
+                    Text(model.errorMessage)
+                        .foregroundColor(.red)
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.red.opacity(0.1))
+                        .cornerRadius(4)
+                }
+
                 if !visibleCommands.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(visibleCommands.prefix(6).enumerated()), id: \.element.id) { index, command in
-                            Text(command.name)
-                                .font(.system(size: 13, weight: .medium, design: .rounded))
-                                .foregroundStyle(index == selectedIndex ? Color.white : Color.primary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(index == selectedIndex ? Color.accentColor : Color.black.opacity(0.05))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                                .onTapGesture {
-                                    selectedIndex = index
-                                    onSubmitSelection(command)
-                                    query = ""
-                                }
-                        }
-                    }
+                    suggestionList
                 }
             }
             .padding(12)
@@ -204,6 +234,9 @@ struct SpotlightPanelContentView: View {
 
             ContentView()
         }
+        // The command bar plus 1000pt of tab content. Suggestions and errors shrink the tab
+        // content instead of growing the panel.
+        .frame(minWidth: 1400, minHeight: 1065)
         .onAppear {
             commandFieldFocused = true
         }
@@ -213,6 +246,61 @@ struct SpotlightPanelContentView: View {
             }
         }
     }
+
+    private var suggestionList: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(visibleCommands.enumerated()), id: \.element.id) { index, command in
+                let isSelected = index == selectedIndex
+                HStack(spacing: 12) {
+                    Text(command.usage)
+                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        .foregroundStyle(isSelected ? Color.white : Color.primary)
+
+                    Spacer()
+
+                    Text(command.summary)
+                        .font(.system(size: 12))
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(isSelected ? Color.accentColor : Color.black.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    selectedIndex = index
+                    submit()
+                }
+            }
+        }
+    }
+
+    private func submit() {
+        if let invocation = registry.invocation(for: trimmedQuery) {
+            run(invocation.command, arguments: invocation.arguments)
+        } else if let selectedCommand {
+            run(selectedCommand, arguments: "")
+        } else if !trimmedQuery.isEmpty {
+            model.errorMessage = "Unknown command: '\(trimmedQuery.split(separator: " ").first ?? "")'. Type ? to see all commands."
+        }
+    }
+
+    private func run(_ command: SpotlightCommand, arguments: String) {
+        if case .required = command.arguments, arguments.isEmpty {
+            // Complete the command name so the user can type its arguments.
+            query = command.name + " "
+            commandFieldFocused = true
+            return
+        }
+
+        model.errorMessage = ""
+        onExecute(command, arguments)
+        if model.errorMessage.isEmpty {
+            query = ""
+            selectedIndex = 0
+        }
+    }
 }
 
 @MainActor
@@ -220,6 +308,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     var hotKeyRef: EventHotKeyRef?
     private var spotlightPanel: SpotlightPanel?
     private let commandRegistry = CommandRegistry()
+    private lazy var model = FocusModel()
     static var shared: AppDelegate?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -312,19 +401,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     private func makeSpotlightRootView() -> some View {
         SpotlightPanelContentView(
-            commandSuggestions: { [commandRegistry] input in
-                commandRegistry.matchingCommands(for: input)
-            },
-            onSubmitSelection: { [weak self] selectedCommand in
-                guard let self, let selectedCommand else {
-                    NSSound.beep()
-                    return
+            registry: commandRegistry,
+            onExecute: { [weak self] command, arguments in
+                command.action(arguments)
+                if command.hidesPanel {
+                    self?.spotlightPanel?.orderOut(nil)
                 }
-
-                self.commandRegistry.execute(selectedCommand)
-                self.spotlightPanel?.orderOut(nil)
             }
         )
+        .environment(model)
         .environment(\.managedObjectContext, PersistenceController.shared.container.viewContext)
     }
 
@@ -345,9 +430,43 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     private func registerCommands() {
         commandRegistry.register(
             SpotlightCommand(
+                name: "timer",
+                arguments: .required("<time> [message]"),
+                summary: "Set a timer (5s, 10m, 2h, 16:00, 5pm, 4:30pm)",
+                action: { [model] arguments in
+                    model.addTimer(arguments)
+                }
+            )
+        )
+        commandRegistry.register(
+            SpotlightCommand(
+                name: "notify",
+                aliases: ["notif"],
+                arguments: .required("<message>"),
+                summary: "Show a notification now",
+                action: { [model] arguments in
+                    model.notify(arguments)
+                }
+            )
+        )
+        commandRegistry.register(
+            SpotlightCommand(
+                name: "new tab",
+                aliases: ["tab", "open tab"],
+                arguments: .optional("[url]"),
+                summary: "Open a new browser tab",
+                action: { [model] arguments in
+                    model.newTab(arguments)
+                }
+            )
+        )
+        commandRegistry.register(
+            SpotlightCommand(
                 name: "new chrome window",
                 aliases: ["chrome", "open chrome", "create chrome window", "google chrome"],
-                action: { [weak self] in
+                summary: "Open a Google Chrome window in this Space",
+                hidesPanel: true,
+                action: { [weak self] _ in
                     self?.openGoogleChromeWindow()
                 }
             )
