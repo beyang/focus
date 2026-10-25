@@ -583,7 +583,7 @@ struct FocusApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        MenuBarExtra("Focus", image: "MenuBarIcon") {
+        MenuBarExtra("Focus", systemImage: "camera.aperture") {
             VStack(alignment: .leading, spacing: 8) {
                 Button("Open Focus Panel") {
                     appDelegate.showSpotlightInput()

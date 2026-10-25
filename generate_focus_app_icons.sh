@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INPUT_IMAGE="${1:-$SCRIPT_DIR/focus-eye.png}"
+INPUT_IMAGE="${1:-$SCRIPT_DIR/focus-shutter.png}"
 APPICONSET_DIR="${2:-$SCRIPT_DIR/Focus/Assets.xcassets/AppIcon.appiconset}"
 
 if [[ ! -f "$INPUT_IMAGE" ]]; then
