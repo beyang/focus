@@ -46,6 +46,7 @@ enum FocusTab: Hashable {
 @Observable
 final class FocusModel {
     static let defaultURL = URL(string: "https://www.google.com")!
+    private static let todoFilePathKey = "Focus.todoFilePath"
 
     var browserTabs: [BrowserTab]
     var selectedTab: FocusTab
@@ -53,6 +54,11 @@ final class FocusModel {
     var webVolume: Double {
         didSet { saveBrowserState() }
     }
+    /// Path of the markdown file holding todos; may start with ~.
+    var todoFilePath: String {
+        didSet { UserDefaults.standard.set(todoFilePath, forKey: Self.todoFilePathKey) }
+    }
+    var todoMarkdown = ""
     /// Error shown under the command bar.
     var errorMessage = ""
 
@@ -67,6 +73,7 @@ final class FocusModel {
         selectedTab = .browser(initialTabs[0].id)
         webVolume = state.webVolume
         activeTimers = persistence.loadTimers()
+        todoFilePath = UserDefaults.standard.string(forKey: Self.todoFilePathKey) ?? "~/todo.md"
 
         pruneTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -132,6 +139,54 @@ final class FocusModel {
 
     private func saveBrowserState() {
         persistence.saveBrowserState(tabURLs: browserTabs.map(\.url.absoluteString), webVolume: webVolume)
+    }
+
+    // MARK: - Todos
+
+    private var todoFileURL: URL? {
+        todoFilePath.isEmpty ? nil : URL(fileURLWithPath: (todoFilePath as NSString).expandingTildeInPath)
+    }
+
+    /// Reads the todo file, creating it empty if it does not exist.
+    func loadTodos() throws {
+        guard let url = todoFileURL else { return }
+        if FileManager.default.fileExists(atPath: url.path) {
+            todoMarkdown = try String(contentsOf: url, encoding: .utf8)
+        } else {
+            todoMarkdown = ""
+            try saveTodos()
+        }
+    }
+
+    func saveTodos() throws {
+        guard let url = todoFileURL else { return }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try todoMarkdown.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Appends an unchecked item to the end of the todo file.
+    func addTodo(_ text: String) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            errorMessage = "todo command requires a description"
+            return
+        }
+        guard !todoFilePath.isEmpty else {
+            errorMessage = "Set a todo file path in the Timers & Todos tab first"
+            return
+        }
+
+        do {
+            // Reread the file so edits made outside Focus are kept.
+            try loadTodos()
+            if !todoMarkdown.isEmpty && !todoMarkdown.hasSuffix("\n") {
+                todoMarkdown += "\n"
+            }
+            todoMarkdown += "- [ ] \(text)\n"
+            try saveTodos()
+        } catch {
+            errorMessage = "Failed to add todo: \(error.localizedDescription)"
+        }
     }
 
     // MARK: - Notifications and timers

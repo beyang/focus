@@ -176,7 +176,11 @@ struct ContentView: View {
                 }
 
                 if model.selectedTab == .timers {
-                    TimersView()
+                    HStack(spacing: 0) {
+                        TimersView()
+                        Divider()
+                        TodoView()
+                    }
                 }
             }
         }
@@ -213,7 +217,7 @@ struct TabBar: View {
     var body: some View {
         HStack(spacing: 4) {
             TabButton(
-                title: model.activeTimers.isEmpty ? "Timers" : "Timers (\(model.activeTimers.count))",
+                title: model.activeTimers.isEmpty ? "Timers & Todos" : "Timers & Todos (\(model.activeTimers.count))",
                 systemImage: "timer",
                 isSelected: model.selectedTab == .timers,
                 onSelect: { model.selectedTab = .timers }

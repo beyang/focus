@@ -440,6 +440,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         )
         commandRegistry.register(
             SpotlightCommand(
+                name: "todo",
+                arguments: .required("<description>"),
+                summary: "Add a todo to the todo file",
+                action: { [model] arguments in
+                    model.addTodo(arguments)
+                }
+            )
+        )
+        commandRegistry.register(
+            SpotlightCommand(
                 name: "notify",
                 aliases: ["notif"],
                 arguments: .required("<message>"),
